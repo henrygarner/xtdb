@@ -46,28 +46,14 @@ value ValidTimeRange {
 
 value Row {
     -- Stored as a row in an Arrow relation.
-    -- The op column is an Arrow union with three legs: put, delete, erase.
+    -- The op column is an Arrow DenseUnion with three legs: put, delete, erase.
     -- See: LiveTable.kt (liveRelation, txRelation)
     iid: IID
     system_from: Timestamp
     valid_time: ValidTimeRange
-    op: Op
+    op: put | delete | erase
+    doc: Document?              -- present when op = put; null for delete/erase
 }
-
-union Op {
-    -- Arrow DenseUnion: exactly one leg is populated per row.
-    put: Put
-    delete: Delete
-    erase: Erase
-}
-
-value Put {
-    -- The put leg is a struct containing the document columns.
-    doc: Document
-}
-
-value Delete { }   -- null marker in the "delete" leg
-value Erase { }    -- null marker in the "erase" leg
 
 ------------------------------------------------------------
 -- Entities
@@ -129,7 +115,7 @@ entity Snapshot {
     table_snapshots: TableSnapshot for this snapshot
 
     -- Derived: which tables are visible in this snapshot
-    visible_tables: table_snapshots.map(ts => ts.table_ref)
+    visible_tables: table_snapshots -> table_ref
 }
 
 entity TableSnapshot {
@@ -146,7 +132,7 @@ entity TableSnapshot {
 -- Defaults
 ------------------------------------------------------------
 
-default erase_valid_time = ValidTimeRange{ from: MIN_TIMESTAMP, to: MAX_TIMESTAMP }
+default ValidTimeRange erase_valid_time = { from: MIN_TIMESTAMP, to: MAX_TIMESTAMP }
 
 ------------------------------------------------------------
 -- Rules: Transaction lifecycle
@@ -197,7 +183,8 @@ rule LogPut {
         iid: iid,
         system_from: table_tx.transaction.system_from,
         valid_time: valid_time,
-        op: Op.put(Put{ doc: doc })
+        op: put,
+        doc: doc
     })
 }
 
@@ -210,7 +197,7 @@ rule LogDelete {
         iid: iid,
         system_from: table_tx.transaction.system_from,
         valid_time: valid_time,
-        op: Op.delete(Delete{})
+        op: delete
     })
 }
 
@@ -223,7 +210,7 @@ rule LogErase {
         iid: iid,
         system_from: table_tx.transaction.system_from,
         valid_time: erase_valid_time,
-        op: Op.erase(Erase{})
+        op: erase
     })
 }
 
@@ -240,7 +227,7 @@ rule CommitTransaction {
     ensures: tx.index.latest_completed_tx = tx.tx_key
 
     -- For each touched table: move rows from tx to live table
-    ensures: for each table_tx in tx.table_txs:
+    ensures: for table_tx in tx.table_txs:
         if table_tx.is_new_table:
             LiveTable.created(
                 index: tx.index,
@@ -276,7 +263,7 @@ rule OpenExternalSnapshot {
 
     ensures:
         let snap = Snapshot.created(basis_tx: index.latest_completed_tx)
-        for each table in index.tables:
+        for table in index.tables:
             TableSnapshot.created(
                 snapshot: snap,
                 table_ref: table.table_ref,
@@ -293,7 +280,7 @@ rule OpenTransactionSnapshot {
 
     ensures:
         let snap = Snapshot.created(basis_tx: tx.tx_key)
-        for each table in tx.index.tables:
+        for table in tx.index.tables:
             let table_tx = tx.table_txs.find(tt => tt.table_ref = table.table_ref)
             TableSnapshot.created(
                 snapshot: snap,
@@ -305,7 +292,7 @@ rule OpenTransactionSnapshot {
                         table.rows                   -- committed only
             )
         -- Also include new tables created in this tx
-        for each table_tx in tx.table_txs with is_new_table:
+        for table_tx in tx.table_txs with is_new_table:
             TableSnapshot.created(
                 snapshot: snap,
                 table_ref: table_tx.table_ref,

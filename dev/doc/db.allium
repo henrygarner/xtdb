@@ -191,7 +191,7 @@ config {
 rule ClientSubmitsTransaction {
     when: ClientSubmitsTx(client, database, tx_ops, opts)
 
-    requires: database.mode == read_write
+    requires: database.mode = read_write
 
     ensures:
         let msg = TxMessage.created(
@@ -229,7 +229,7 @@ rule ProcessFlushBlockMessage {
     when: msg: FlushBlockMessage appended to database.source_log
 
     requires: msg.msg_id > log_processor.latest_processed_msg_id
-    requires: msg.expected_block_idx == block_catalog.current_block_index
+    requires: msg.expected_block_idx = block_catalog.current_block_index
 
     ensures:
         log_processor.latest_processed_msg_id = msg.msg_id
@@ -242,8 +242,8 @@ rule ProcessTriesAddedMessage {
     when: msg: TriesAddedMessage appended to database.source_log
 
     requires: msg.msg_id > log_processor.latest_processed_msg_id
-    requires: msg.storage_version == current_storage_version
-    requires: msg.storage_epoch == current_storage_epoch
+    requires: msg.storage_version = current_storage_version
+    requires: msg.storage_epoch = current_storage_epoch
 
     ensures:
         trie_cat/trie_catalog.addTries(msg.tries, msg.log_timestamp)
@@ -264,7 +264,7 @@ rule LeaderFinishesBlock {
     -- any practical difference between these two sources.
     when: BlockFlushNeeded(log_timestamp)
 
-    requires: database.mode == read_write
+    requires: database.mode = read_write
 
     let block_index = (block_catalog.current_block_index ?? -1) + 1
     -- finishBlock returns a per-table map of finished blocks,
@@ -306,7 +306,7 @@ rule LeaderFinishesBlock {
 rule FollowerWaitsForBlock {
     when: BlockFlushNeeded(log_timestamp)
 
-    requires: database.mode == read_only
+    requires: database.mode = read_only
 
     let expected_block_idx = (block_catalog.current_block_index ?? -1) + 1
 
@@ -314,7 +314,7 @@ rule FollowerWaitsForBlock {
     ensures:
         let block = ObjectStore.blockAppears(expected_block_idx)
 
-        requires: block.latest_processed_msg_id == log_processor.latest_processed_msg_id
+        requires: block.latest_processed_msg_id = log_processor.latest_processed_msg_id
 
         -- Synchronise local state from the block.
         block_catalog.refresh(block)
@@ -332,7 +332,7 @@ rule FollowerWaitsForBlock {
 rule FlushTimeoutFires {
     when: log_processor: LogProcessor.last_flush_check + config.flush_timeout <= now
 
-    requires: database.mode == read_write
+    requires: database.mode = read_write
     requires: live_index.has_data
     requires: block_catalog.current_block_index unchanged since log_processor.last_flush_check
 
@@ -386,7 +386,7 @@ surface TransactionSubmission {
 
     provides:
         ClientSubmitsTx(caller, db, tx_ops, opts)
-            when db.mode == read_write
+            when db.mode = read_write
 
     invariant: OrderedProcessing
         -- Transactions are processed in the order they appear in the source log, not the order they were submitted.

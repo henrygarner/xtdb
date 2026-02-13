@@ -41,60 +41,61 @@ value Path {
 }
 
 ------------------------------------------------------------
--- Configuration Constants
-------------------------------------------------------------
-
--- Threshold for promoting log entries to sorted data
--- Batches writes before incurring sort cost
-default LOG_LIMIT = 64
-
--- Maximum entries per leaf before splitting into branch
-default PAGE_LIMIT = 1024
-
--- Maximum tree depth (supports 16-byte IIDs with 2-bit bucketing)
-default MAX_LEVEL = 64
-
--- Bits extracted per level (determines branching factor)
--- 2 bits -> 4 children, 4 bits -> 16 children, 8 bits -> 256 children
-default LEVEL_BITS = 2
-
-------------------------------------------------------------
 -- Entities
 ------------------------------------------------------------
 
 entity MemoryHashTrie {
     root_node: Node
     iid_reader: VectorReader   -- external vector for IID lookups
-    log_limit: Integer = LOG_LIMIT
-    page_limit: Integer = PAGE_LIMIT
+    log_limit: Integer
+    page_limit: Integer
 }
 
 entity Node {
     path: Path                 -- position in trie hierarchy
-    type: branch | leaf
+    type: Branch | Leaf
 }
 
-entity Branch extends Node {
+variant Branch : Node {
     -- Branch nodes distribute indices across children by IID bits
-    -- Number of children = 2^LEVEL_BITS (4 for default 2-bit bucketing)
+    -- Number of children = 2^config.level_bits (4 for default 2-bit bucketing)
     children: List<Node?>      -- sparse array, nulls for empty buckets
 }
 
-entity Leaf extends Node {
+variant Leaf : Node {
     -- Leaf nodes store actual row indices
 
     data: List<Integer>        -- SORTED indices (compacted from previous logs)
     log: List<Integer>         -- UNSORTED indices (recent additions, up to log_limit)
     log_count: Integer         -- number of valid entries in log
 
-    -- Volatile cache for merged result.
+    -- Cache for merged result.
     -- Multiple concurrent readers may race on this field; since the result is
     -- deterministic, the worst case is redundant computation.
-    -- Must be @Volatile to ensure visibility across threads on weak memory models.
     -- See: MemoryHashTrie.kt (Leaf.sortedData)
-    sorted_data_cache: volatile List<Integer>?
+    sorted_data_cache: List<Integer>?
 
     total_count: data.count + log_count
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- Threshold for promoting log entries to sorted data.
+    -- Batches writes before incurring sort cost.
+    log_limit: Integer = 64
+
+    -- Maximum entries per leaf before splitting into branch.
+    page_limit: Integer = 1024
+
+    -- Maximum tree depth (supports 16-byte IIDs with 2-bit bucketing).
+    max_level: Integer = 64
+
+    -- Bits extracted per level (determines branching factor).
+    -- 2 bits -> 4 children, 4 bits -> 16 children, 8 bits -> 256 children.
+    level_bits: Integer = 2
 }
 
 ------------------------------------------------------------
@@ -107,17 +108,17 @@ entity Leaf extends Node {
 --   - Bucketing is DETERMINISTIC: same IID always yields same bucket sequence
 --   - Bucketing is PREFIX-PRESERVING: IIDs sharing a prefix share path prefix
 --   - At max depth, the full path reconstructs the original IID
---   - Branching factor = 2^LEVEL_BITS (4 children with default 2-bit bucketing)
+--   - Branching factor = 2^config.level_bits (4 children with default 2-bit bucketing)
 ------------------------------------------------------------
 
 rule BucketFor {
     when: BucketFor(iid, level)
 
     -- Deterministically maps IID to bucket index at given level
-    -- Returns value in range [0, 2^LEVEL_BITS - 1]
+    -- Returns value in range [0, 2^config.level_bits - 1]
 
     ensures:
-        result in 0..(2^LEVEL_BITS - 1)
+        result in 0..(2^config.level_bits - 1)
         -- Same IID at same level always returns same bucket
         BucketFor(iid, level) = BucketFor(iid, level)
 }
@@ -203,7 +204,7 @@ rule CompactLogs {
     let merged = merge_sorted(leaf.data, sorted_log, trie)
 
     ensures:
-        if merged.count > trie.page_limit and leaf.path.count < MAX_LEVEL:
+        if merged.count > trie.page_limit and leaf.path.count < config.max_level:
             -- Split into branch with child leaves
             leaf.split_into_branch(trie, merged)
         else:
@@ -226,7 +227,7 @@ rule SplitIntoBranch {
 
     ensures: Branch.created(
         path: leaf.path,
-        children: for bucket_idx in 0..(2^LEVEL_BITS - 1):
+        children: for bucket_idx in 0..(2^config.level_bits - 1):
             if buckets[bucket_idx] != null:
                 Leaf.created(
                     path: leaf.path.append(bucket_idx),
@@ -334,7 +335,7 @@ rule ForEachMatch {
     -- Iterate all indices that could match the given hash
     -- (same bucket path). Consumer receives each candidate.
 
-    ensures: for each index in trie where bucket_matches(index, hash):
+    ensures: for index in trie where bucket_matches(index, hash):
         consumer(index)
 }
 
@@ -373,7 +374,7 @@ rule AddIfNotPresent {
 -- 5. Splitting: leaves split into branches when exceeding page_limit,
 --    EXCEPT at max depth where leaves can grow unbounded
 
--- 6. Max depth overflow: at MAX_LEVEL depth, a leaf CANNOT split further.
+-- 6. Max depth overflow: at config.max_level depth, a leaf CANNOT split further.
 --    It accumulates all indices for that IID prefix regardless of page_limit.
 --    (Tested with 50,000 entries in a single max-depth leaf)
 

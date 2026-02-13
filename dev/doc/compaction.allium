@@ -67,7 +67,7 @@ rule CompactorWakesUp {
     let jobs = available_jobs(trie_cat/trie_catalog)
 
     ensures:
-        for each job in jobs:
+        for job in jobs:
             CompactionJob.created(
                 table: job.table,
                 input_trie_keys: job.trie_keys,
